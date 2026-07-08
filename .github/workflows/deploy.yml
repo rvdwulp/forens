@@ -27,6 +27,8 @@ jobs:
       - name: Haal RDW-parkeerdata op en bouw de site
         run: node scripts/fetch-data.js
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

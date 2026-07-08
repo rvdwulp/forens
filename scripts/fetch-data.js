@@ -31,38 +31,49 @@ async function main() {
     console.error('Index ophalen mislukt:', e.message);
   }
 
+  const dynamicBase = INDEX_URL.replace(/\/+$/, '') + '/dynamic/';
+
   for (const loc of LOCATIES) {
     const kandidaten = facilities.filter(f => loc.patroon.test(f.name || ''));
-    const fac = kandidaten.find(f => f.dynamicDataUrl) || kandidaten[0] || null;
     const entry = {
       key: loc.key,
       label: loc.label,
-      name: fac?.name ?? null,
-      identifier: fac?.identifier ?? null,
-      dynamicDataUrl: fac?.dynamicDataUrl ?? null,
+      name: kandidaten[0]?.name ?? null,
+      identifier: kandidaten[0]?.identifier ?? null,
+      dynamicDataUrl: null,
       status: null,
       note: null,
     };
 
     if (indexFout) entry.note = 'RDW-index onbereikbaar: ' + indexFout;
-    else if (!fac) entry.note = 'Niet gevonden in RDW-index';
-    else if (!fac.dynamicDataUrl) entry.note = `"${fac.name}" levert geen realtime data aan het NPR`;
+    else if (!kandidaten.length) entry.note = 'Niet gevonden in RDW-index';
     else {
-      try {
-        const d = await haalJson(fac.dynamicDataUrl);
-        entry.status = d?.parkingFacilityDynamicInformation?.facilityActualStatus ?? null;
-        if (!entry.status) entry.note = 'Onverwacht antwoord van dynamisch endpoint';
-      } catch (e) {
-        entry.note = 'Dynamische data ophalen mislukt: ' + e.message;
+      // Probeer élke kandidaat: ook registraties zonder dynamicDataUrl in de
+      // index blijken soms wel een werkend dynamisch endpoint te hebben.
+      const volgorde = [...kandidaten].sort((a, b) => (b.dynamicDataUrl ? 1 : 0) - (a.dynamicDataUrl ? 1 : 0));
+      for (const fac of volgorde) {
+        const dynUrl = fac.dynamicDataUrl || dynamicBase + fac.identifier;
+        try {
+          const d = await haalJson(dynUrl);
+          const status = d?.parkingFacilityDynamicInformation?.facilityActualStatus;
+          console.log(`  probe "${fac.name}" (${fac.identifier}): ` +
+            (status ? `OK, ${status.vacantSpaces} vrij van ${status.parkingCapacity}` : 'antwoord zonder facilityActualStatus'));
+          if (status) {
+            Object.assign(entry, { name: fac.name, identifier: fac.identifier, dynamicDataUrl: dynUrl, status });
+            break;
+          }
+        } catch (e) {
+          console.log(`  probe "${fac.name}" (${fac.identifier}): ${e.message}`);
+        }
+      }
+      if (!entry.status) {
+        entry.note = `Geen van de ${kandidaten.length} registraties (${kandidaten.map(f => f.name).join(' | ')}) levert realtime data`;
       }
     }
 
     console.log(loc.label, '→', entry.status
       ? `${entry.status.vacantSpaces} vrij van ${entry.status.parkingCapacity} (${entry.name})`
       : entry.note);
-    if (kandidaten.length > 1) {
-      console.log('  (meerdere matches in index:', kandidaten.map(f => f.name).join(' | ') + ')');
-    }
     locations.push(entry);
   }
 
