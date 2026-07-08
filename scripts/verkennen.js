@@ -1,68 +1,56 @@
 #!/usr/bin/env node
-// Eenmalige verkenning (draait handmatig via workflow_dispatch): waar haalt de
-// bestaande P+R-kaart van Zuid-Holland Bereikbaar zijn realtime data vandaan,
-// en wat staat er in de statische RDW-registraties van Slinge/Kralingse Zoom?
-const SITES = ['https://pr-rotterdam.zuidhollandbereikbaar.nl/'];
+// Verkenning (draait handmatig via workflow_dispatch): welke van de AWS-API's
+// achter pr-rotterdam.zuidhollandbereikbaar.nl levert de P+R-lijst en de
+// realtime bezetting, en hoe zien Slinge (boven/beneden), Noorderhelling en
+// Kralingse Zoom eruit in die data?
+const BASES = [
+  'https://rswxenrn8a.execute-api.eu-central-1.amazonaws.com',
+  'https://qvkng6ajmd.execute-api.eu-central-1.amazonaws.com',
+  'https://e16bh86bl6.execute-api.eu-central-1.amazonaws.com',
+];
+const PADEN = ['/api/parking/facilities/pr', '/api/parking/dynamic', '/api/dynamic/', '/api/geo/'];
 
-async function tekst(url) {
+async function probe(url) {
   try {
     const res = await fetch(url, {
-      signal: AbortSignal.timeout(30000),
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; pr-monitor-verkenning)' },
+      signal: AbortSignal.timeout(20000),
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; pr-monitor-verkenning)', Origin: 'https://pr-rotterdam.zuidhollandbereikbaar.nl' },
     });
-    console.log('\n## ' + url + ' → HTTP ' + res.status + ' (' + (res.headers.get('content-type') || '?') + ')');
-    return res.ok ? await res.text() : '';
+    const cors = res.headers.get('access-control-allow-origin');
+    const body = await res.text();
+    console.log(`\n## ${url}\n   HTTP ${res.status} | CORS: ${cors} | ${body.length} bytes`);
+    return { status: res.status, body };
   } catch (e) {
-    console.log('\n## ' + url + ' → ' + e.message);
-    return '';
+    console.log(`\n## ${url}\n   ${e.message}`);
+    return { status: 0, body: '' };
   }
-}
-
-function urlsUit(t, basis) {
-  const abs = [...t.matchAll(/https?:\/\/[^\s"'<>\\)]+/g)].map(m => m[0]);
-  const rel = [...t.matchAll(/(?:src|href)=["']([^"']+)["']/g)].map(m => m[1]);
-  const relAbs = rel.map(r => { try { return new URL(r, basis).href; } catch { return null; } }).filter(Boolean);
-  return [...new Set([...abs, ...relAbs])];
 }
 
 (async () => {
-  for (const site of SITES) {
-    const html = await tekst(site);
-    const urls = urlsUit(html, site);
-    console.log('URLs in pagina:');
-    urls.forEach(u => console.log('  ' + u));
-
-    for (const u of urls.filter(u => /\.m?js(\?|$)/.test(u)).slice(0, 12)) {
-      const js = await tekst(u);
-      if (!js) continue;
-      const interessant = urlsUit(js, u).filter(x => /api|data|park|rdw|json|graphql|socket/i.test(x));
-      const paden = [...js.matchAll(/["'](\/[a-zA-Z0-9_\-\/.]{3,90})["']/g)].map(m => m[1])
-        .filter(p => /api|data|park|json|feed/i.test(p));
-      console.log('  interessante URLs:');
-      [...new Set(interessant)].slice(0, 50).forEach(x => console.log('    ' + x));
-      [...new Set(paden)].slice(0, 50).forEach(p => console.log('    pad: ' + p));
+  const werkend = [];
+  for (const base of BASES) {
+    for (const pad of PADEN) {
+      const r = await probe(base + pad);
+      if (r.status === 200 && r.body) {
+        werkend.push({ url: base + pad, body: r.body });
+        console.log('   eerste 600 tekens: ' + r.body.slice(0, 600).replace(/\s+/g, ' '));
+      }
     }
   }
 
-  // Statische RDW-registraties: zit daar deel-/capaciteitsinformatie in?
-  const REGISTRATIES = [
-    ['P+R Slinge (Rotterdam)', '24aca731-db99-4c8b-a429-b664bc5a17bf'],
-    ['PR Slinge', '902ff643-73b3-4591-a30d-2e26634dec48'],
-    ['P+R Kralingse Zoom (Rotterdam) #1', 'cbf81a2f-235b-409a-8b96-eaa8c249a735'],
-    ['P+R Kralingse Zoom (Rotterdam) #2', '2522ba8f-54c7-445c-bc4b-36405823376b'],
-    ['PR Kralingse Zoom', '54c095f4-49fe-4d4d-91a4-0fb32a2106df'],
-  ];
-  for (const [naam, id] of REGISTRATIES) {
-    try {
-      const res = await fetch('https://npropendata.rdw.nl/parkingdata/v2/static/' + id, { signal: AbortSignal.timeout(20000) });
-      if (!res.ok) { console.log('\nstatic ' + naam + ' → HTTP ' + res.status); continue; }
-      const i = (await res.json()).parkingFacilityInformation || {};
-      console.log('\nstatic ' + naam + ' →',
-        'specifications:', JSON.stringify(i.specifications),
-        '| accessPoints:', (i.accessPoints || []).length,
-        '| description:', i.description);
-    } catch (e) {
-      console.log('\nstatic ' + naam + ' → ' + e.message);
-    }
+  // Zoek onze drie locaties in elk werkend antwoord en print de volledige items
+  for (const { url, body } of werkend) {
+    let data;
+    try { data = JSON.parse(body); } catch { continue; }
+    const items = Array.isArray(data) ? data
+      : Array.isArray(data.features) ? data.features
+      : Array.isArray(data.facilities) ? data.facilities
+      : Array.isArray(data.data) ? data.data : null;
+    if (!items) { console.log('\n' + url + ': geen array gevonden, sleutels: ' + Object.keys(data)); continue; }
+    console.log('\n=== ' + url + ': ' + items.length + ' items');
+    const relevant = items.filter(i => /slinge|kralingse|noorderhelling/i.test(JSON.stringify(i)));
+    console.log('Relevante items (' + relevant.length + '):');
+    relevant.forEach(i => console.log(JSON.stringify(i)));
+    if (!relevant.length && items.length) console.log('voorbeeld-item: ' + JSON.stringify(items[0]).slice(0, 800));
   }
 })();
