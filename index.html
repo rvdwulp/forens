@@ -171,6 +171,40 @@
     const NPR_INDEX_URL = 'https://npropendata.rdw.nl/parkingdata/v2/';
     const POLL_MS = 60 * 1000;
     const CACHE_KEY = 'prMonitorUrls';
+    const ROUTE_KEY = 'prMonitorRoute';
+
+    // Het RDW-endpoint stuurt geen CORS-headers, dus een directe fetch wordt
+    // door de browser geblokkeerd. Probeer direct en val terug op publieke
+    // CORS-proxies; de eerste route die werkt wordt onthouden.
+    const ROUTES = [
+      u => u,
+      u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+      u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+      u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
+    ];
+    let routeIndex = Math.min(parseInt(localStorage.getItem(ROUTE_KEY)) || 0, ROUTES.length - 1);
+
+    async function haalJson(url, timeoutMs) {
+      let laatsteFout = null;
+      for (let i = 0; i < ROUTES.length; i++) {
+        const idx = (routeIndex + i) % ROUTES.length;
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+        try {
+          const res = await fetch(ROUTES[idx](url), { signal: ctrl.signal });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          routeIndex = idx;
+          localStorage.setItem(ROUTE_KEY, String(idx));
+          return data;
+        } catch (e) {
+          laatsteFout = e;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      throw laatsteFout || new Error('geen route beschikbaar');
+    }
 
     const LOCATIES = [
       { key: 'slinge',         label: 'P+R Slinge',         patroon: /slinge/i },
@@ -263,9 +297,8 @@
         if (cached && LOCATIES.every(l => l.key in cached)) return cached;
       } catch {}
 
-      const res = await fetch(NPR_INDEX_URL);
-      if (!res.ok) throw new Error('RDW-index ophalen mislukt: HTTP ' + res.status);
-      const index = await res.json();
+      // De index is enkele MB's groot; ruime timeout, zeker via een proxy
+      const index = await haalJson(NPR_INDEX_URL, 45000);
       const facilities = index.ParkingFacilities || [];
 
       const urls = {};
@@ -281,9 +314,7 @@
     }
 
     async function haalStatus(url) {
-      const res = await fetch(url);
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
+      const data = await haalJson(url, 15000);
       const status = data?.parkingFacilityDynamicInformation?.facilityActualStatus;
       if (!status) throw new Error('Onverwacht antwoord van RDW-API');
       return status;
@@ -301,7 +332,7 @@
       } catch (e) {
         console.error(e);
         foutBalk.textContent = 'Kon de RDW-parkeerindex niet ophalen (' + e.message +
-          '). Mogelijk blokkeert de browser het RDW-endpoint (CORS); probeer het later opnieuw.';
+          '), ook niet via de reserve-routes. Probeer het over een minuut opnieuw met de Ververs-knop.';
         foutBalk.classList.add('zichtbaar');
         LOCATIES.forEach(l => renderTegelFout(l.key, 'Bron onbereikbaar'));
         btn.disabled = false;

@@ -23,6 +23,14 @@ zichtbaar is), met `vacantSpaces`, `parkingCapacity`, `open`, `full` en
 Alles zit in één bestand zonder dependencies: open `index.html` in een browser,
 of host de map als statische site (bijv. GitHub Pages).
 
-Let op: het RDW-endpoint stuurt niet gegarandeerd CORS-headers mee. Werkt de
-pagina niet rechtstreeks vanuit de browser, dan is een kleine server-side proxy
-nodig die de RDW-antwoorden doorgeeft.
+## CORS
+
+Het RDW-endpoint stuurt geen CORS-headers mee, dus een directe fetch vanuit de
+browser wordt geblokkeerd. De pagina probeert daarom eerst een directe fetch en
+valt automatisch terug op publieke CORS-proxies (corsproxy.io, allorigins.win,
+codetabs.com); de eerste route die werkt wordt onthouden in `localStorage`.
+
+Publieke proxies zijn gratis maar zonder garanties. Voor een robuustere opzet
+kan een eigen kleine proxy (bijv. een Cloudflare Worker die de RDW-antwoorden
+doorgeeft) als extra route bovenaan de `ROUTES`-lijst in `index.html` worden
+gezet.
