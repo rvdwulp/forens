@@ -125,6 +125,10 @@
     .tegel[data-status="gesloten"] .status-icoon { color: var(--ink-muted); }
 
     .tegel-detail { color: var(--ink-2); font-size: 12px; }
+    .tegel-delen { color: var(--ink-2); font-size: 12px; display: flex; flex-direction: column; gap: 2px; }
+    .tegel-delen:empty { display: none; }
+    .tegel-deel { display: flex; justify-content: space-between; gap: 8px; }
+    .tegel-deel .deel-waarde { font-weight: 600; white-space: nowrap; }
     .tegel-tijd { color: var(--ink-muted); font-size: 11px; }
 
     .fout-balk {
@@ -171,7 +175,7 @@
     const NPR_INDEX_URL = 'https://npropendata.rdw.nl/parkingdata/v2/';
     const NPR_DYNAMIC_BASE = 'https://npropendata.rdw.nl/parkingdata/v2/dynamic/';
     const POLL_MS = 60 * 1000;
-    const CACHE_KEY = 'prMonitorUrls2';
+    const CACHE_KEY = 'prMonitorUrls3';
     const ROUTE_KEY = 'prMonitorRoute';
 
     const LOCATIES = [
@@ -246,11 +250,43 @@
             <span id="statustekst-${l.key}">Laden…</span>
           </div>
           <div class="tegel-detail" id="detail-${l.key}"></div>
+          <div class="tegel-delen" id="delen-${l.key}"></div>
           <div class="tegel-tijd" id="tijd-${l.key}"></div>
         </div>`).join('');
     }
 
-    function renderTegel(key, status) {
+    function escHtml(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // Meerdere registraties van één terrein (bijv. bovendek/benedendek) tellen
+    // we op tot één totaalstatus; de delen worden apart onder de meter getoond.
+    function aggregeer(statussen) {
+      const met = statussen.filter(Boolean);
+      if (!met.length) return null;
+      const som = veld => met.some(s => typeof s[veld] === 'number')
+        ? met.reduce((t, s) => t + (typeof s[veld] === 'number' ? s[veld] : 0), 0)
+        : undefined;
+      const vrij = som('vacantSpaces');
+      return {
+        vacantSpaces: vrij,
+        parkingCapacity: som('parkingCapacity'),
+        open: met.some(s => s.open !== false),
+        full: met.every(s => s.full === true) || vrij === 0,
+        lastUpdated: Math.max(...met.map(s => s.lastUpdated || 0)) || undefined,
+      };
+    }
+
+    function renderDelen(key, parts) {
+      const el = document.getElementById('delen-' + key);
+      if (!parts || parts.length < 2) { el.innerHTML = ''; return; }
+      el.innerHTML = parts.map(p => `<div class="tegel-deel">
+        <span>${escHtml(p.name)}</span>
+        <span class="deel-waarde">${typeof p.status?.vacantSpaces === 'number' ? p.status.vacantSpaces + ' vrij' : '–'}</span>
+      </div>`).join('');
+    }
+
+    function renderTegel(key, status, parts) {
       const st = bepaalStatus(status);
       const info = STATUS_TEKST[st];
       const tegel = document.getElementById('tegel-' + key);
@@ -281,6 +317,7 @@
       } else {
         document.getElementById('tijd-' + key).textContent = '';
       }
+      renderDelen(key, parts);
     }
 
     function renderTegelFout(key, melding) {
@@ -292,6 +329,7 @@
       document.getElementById('statustekst-' + key).textContent = 'Geen data';
       document.getElementById('detail-' + key).textContent = melding;
       document.getElementById('tijd-' + key).textContent = '';
+      document.getElementById('delen-' + key).innerHTML = '';
     }
 
     // Snapshot die de GitHub Actions-workflow elke ~10 minuten naast de site
@@ -342,20 +380,25 @@
         for (const e of snapshot.locations) snapPer[e.key] = e;
         for (const loc of LOCATIES) {
           const e = snapPer[loc.key];
-          if (e?.status) renderTegel(loc.key, e.status);
+          if (e?.status) renderTegel(loc.key, e.status, e.parts);
           else renderTegelFout(loc.key, e?.note || 'Geen data in snapshot');
         }
       }
 
-      // 2. Live verversen via de kleine dynamische endpoints
+      // 2. Live verversen via de kleine dynamische endpoints, per deel
       let cache = {};
       try { cache = JSON.parse(localStorage.getItem(CACHE_KEY)) || {}; } catch {}
 
-      const liveUrl = loc => snapPer[loc.key]?.dynamicDataUrl || cache[loc.key]?.url ||
-        (loc.uuid ? NPR_DYNAMIC_BASE + loc.uuid : null);
+      const liveDelen = loc => {
+        const snapParts = snapPer[loc.key]?.parts?.filter(p => p.dynamicDataUrl);
+        if (snapParts?.length) return snapParts.map(p => ({ name: p.name, url: p.dynamicDataUrl }));
+        if (cache[loc.key]?.parts?.length) return cache[loc.key].parts;
+        if (loc.uuid) return [{ name: loc.label, url: NPR_DYNAMIC_BASE + loc.uuid }];
+        return [];
+      };
 
       let indexUrls = {};
-      if (!snapshot && LOCATIES.some(l => !liveUrl(l))) {
+      if (!snapshot && LOCATIES.some(l => !liveDelen(l).length)) {
         try { indexUrls = await zoekInIndex(); } catch (e) { console.error('RDW-index', e); }
       }
 
@@ -363,9 +406,10 @@
       await Promise.all(LOCATIES.map(async loc => {
         const snap = snapPer[loc.key];
         const entry = indexUrls[loc.key];
-        const url = liveUrl(loc) || entry?.url || null;
+        let delen = liveDelen(loc);
+        if (!delen.length && entry?.url) delen = [{ name: entry.naam, url: entry.url }];
 
-        if (!url) {
+        if (!delen.length) {
           if (!snap) {
             renderTegelFout(loc.key, entry && !entry.url
               ? `"${entry.naam}" levert geen realtime data`
@@ -374,16 +418,23 @@
           return;
         }
 
-        try {
-          renderTegel(loc.key, await haalStatus(url));
+        const resultaten = await Promise.all(delen.map(d =>
+          haalStatus(d.url).then(status => ({ ...d, status })).catch(e => ({ ...d, fout: e }))
+        ));
+        const gelukt = resultaten.filter(r => r.status);
+        const totaal = aggregeer(gelukt.map(r => r.status));
+
+        if (totaal) {
+          renderTegel(loc.key, totaal, gelukt.map(r => ({ name: r.name, status: r.status })));
           liveGelukt++;
-          cache[loc.key] = { url, naam: snap?.name || entry?.naam || loc.label };
-        } catch (e) {
-          console.error(loc.label, e);
-          if (String(e.message).includes('404')) delete cache[loc.key];
+          cache[loc.key] = { parts: gelukt.map(r => ({ name: r.name, url: r.url })) };
+        } else {
+          const fout = resultaten.find(r => r.fout)?.fout;
+          console.error(loc.label, fout);
+          if (String(fout?.message).includes('404')) delete cache[loc.key];
           // Met een snapshot in beeld laten we die gewoon staan
           if (!snap?.status) {
-            renderTegelFout(loc.key, snap?.note || 'Ophalen mislukt: ' + e.message);
+            renderTegelFout(loc.key, snap?.note || 'Ophalen mislukt: ' + (fout?.message || 'onbekend'));
           }
         }
       }));
