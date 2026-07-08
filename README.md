@@ -12,25 +12,29 @@ Rotterdamse P+R-terreinen:
 [RDW open parkeerdata / Nationaal Parkeer Register](https://npropendata.rdw.nl/parkingdata/v2/)
 — open data, geen API-key nodig.
 
-De pagina zoekt de drie locaties één keer op in de RDW-index en bewaart de
-gevonden dynamische data-URL's in `localStorage`. Daarna wordt per locatie het
-dynamische endpoint elke 60 seconden opgevraagd (alleen als het tabblad
-zichtbaar is), met `vacantSpaces`, `parkingCapacity`, `open`, `full` en
-`lastUpdated`.
+## Hoe het werkt
 
-## Gebruik
+Het RDW-endpoint stuurt geen CORS-headers mee en de index is megabytes groot,
+dus rechtstreeks ophalen vanuit de browser is onbetrouwbaar. Daarom in twee
+lagen:
 
-Alles zit in één bestand zonder dependencies: open `index.html` in een browser,
-of host de map als statische site (bijv. GitHub Pages).
+1. **Snapshot (betrouwbaar).** De GitHub Actions-workflow
+   (`.github/workflows/deploy.yml`) draait elke ~10 minuten
+   `scripts/fetch-data.js`: die zoekt de drie locaties op in de RDW-index,
+   haalt hun dynamische data op en deployt de site naar GitHub Pages met een
+   verse `data.json`. De pagina laadt die snapshot altijd eerst — zelfde
+   origin, dus geen CORS.
+2. **Live verversen (best effort).** Daarna probeert de pagina elke minuut de
+   kleine dynamische endpoints rechtstreeks bij te werken (direct, en anders
+   via publieke CORS-proxies). Lukt dat, dan zie je "Live bijgewerkt"; zo
+   niet, dan blijft de snapshot staan met "Snapshot van HH:MM".
 
-## CORS
+## Installatie
 
-Het RDW-endpoint stuurt geen CORS-headers mee, dus een directe fetch vanuit de
-browser wordt geblokkeerd. De pagina probeert daarom eerst een directe fetch en
-valt automatisch terug op publieke CORS-proxies (corsproxy.io, allorigins.win,
-codetabs.com); de eerste route die werkt wordt onthouden in `localStorage`.
+1. Zet in de repository-instellingen *Settings → Pages → Build and deployment
+   → Source* op **GitHub Actions**.
+2. Push naar `main` (of start de workflow handmatig via *Actions → Deploy met
+   verse parkeerdata → Run workflow*).
 
-Publieke proxies zijn gratis maar zonder garanties. Voor een robuustere opzet
-kan een eigen kleine proxy (bijv. een Cloudflare Worker die de RDW-antwoorden
-doorgeeft) als extra route bovenaan de `ROUTES`-lijst in `index.html` worden
-gezet.
+De workflow-logs tonen per locatie wat er in het RDW-register gevonden is —
+handig om te zien of een terrein überhaupt realtime data levert.

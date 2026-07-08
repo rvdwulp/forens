@@ -162,16 +162,33 @@
     <div class="tegels" id="tegels"></div>
 
     <footer>
-      Bron: <a href="https://npropendata.rdw.nl/parkingdata/v2/" target="_blank" rel="noopener">RDW open parkeerdata (Nationaal Parkeer Register)</a>,
-      ververst automatisch elke minuut.
+      Bron: <a href="https://npropendata.rdw.nl/parkingdata/v2/" target="_blank" rel="noopener">RDW open parkeerdata (Nationaal Parkeer Register)</a>.
+      Een GitHub Action ververst de snapshot elke ~10 minuten; waar mogelijk haalt de pagina daarnaast elke minuut live cijfers op.
     </footer>
   </div>
 
   <script>
     const NPR_INDEX_URL = 'https://npropendata.rdw.nl/parkingdata/v2/';
+    const NPR_DYNAMIC_BASE = 'https://npropendata.rdw.nl/parkingdata/v2/dynamic/';
     const POLL_MS = 60 * 1000;
-    const CACHE_KEY = 'prMonitorUrls';
+    const CACHE_KEY = 'prMonitorUrls2';
     const ROUTE_KEY = 'prMonitorRoute';
+
+    const LOCATIES = [
+      { key: 'slinge',         label: 'P+R Slinge',         patroon: /slinge/i,           uuid: null },
+      { key: 'noorderhelling', label: 'P+R Noorderhelling', patroon: /noorderhelling/i,   uuid: null },
+      { key: 'kralingsezoom',  label: 'P+R Kralingse Zoom', patroon: /kralingse\s*zoom/i, uuid: '54c095f4-49fe-4d4d-91a4-0fb32a2106df' },
+    ];
+
+    // status → icoon + tekst; kleur draagt de betekenis nooit alleen
+    const STATUS_TEKST = {
+      good:     { icoon: '●', tekst: 'Voldoende plek' },
+      warning:  { icoon: '●', tekst: 'Beperkt plek' },
+      serious:  { icoon: '●', tekst: 'Bijna vol' },
+      critical: { icoon: '●', tekst: 'Vol' },
+      gesloten: { icoon: '○', tekst: 'Gesloten' },
+      onbekend: { icoon: '○', tekst: 'Geen data' },
+    };
 
     // Het RDW-endpoint stuurt geen CORS-headers, dus een directe fetch wordt
     // door de browser geblokkeerd. Probeer direct en val terug op publieke
@@ -205,22 +222,6 @@
       }
       throw laatsteFout || new Error('geen route beschikbaar');
     }
-
-    const LOCATIES = [
-      { key: 'slinge',         label: 'P+R Slinge',         patroon: /slinge/i },
-      { key: 'noorderhelling', label: 'P+R Noorderhelling', patroon: /noorderhelling/i },
-      { key: 'kralingsezoom',  label: 'P+R Kralingse Zoom', patroon: /kralingse\s*zoom/i },
-    ];
-
-    // status → icoon + tekst; kleur draagt de betekenis nooit alleen
-    const STATUS_TEKST = {
-      good:     { icoon: '●', tekst: 'Voldoende plek' },
-      warning:  { icoon: '●', tekst: 'Beperkt plek' },
-      serious:  { icoon: '●', tekst: 'Bijna vol' },
-      critical: { icoon: '●', tekst: 'Vol' },
-      gesloten: { icoon: '○', tekst: 'Gesloten' },
-      onbekend: { icoon: '○', tekst: 'Geen data' },
-    };
 
     function bepaalStatus(s) {
       if (s.open === false) return 'gesloten';
@@ -277,6 +278,8 @@
         const ms = status.lastUpdated > 1e12 ? status.lastUpdated : status.lastUpdated * 1000;
         document.getElementById('tijd-' + key).textContent =
           'Meting van ' + new Date(ms).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
+      } else {
+        document.getElementById('tijd-' + key).textContent = '';
       }
     }
 
@@ -288,29 +291,18 @@
       document.getElementById('icoon-' + key).textContent = '○';
       document.getElementById('statustekst-' + key).textContent = 'Geen data';
       document.getElementById('detail-' + key).textContent = melding;
+      document.getElementById('tijd-' + key).textContent = '';
     }
 
-    // De UUID's zijn stabiel: één keer opzoeken in de (grote) index, daarna uit cache.
-    async function vindUrls() {
+    // Snapshot die de GitHub Actions-workflow elke ~10 minuten naast de site
+    // deployt. Zelfde origin, dus geen CORS en altijd snel.
+    async function haalSnapshot() {
       try {
-        const cached = JSON.parse(localStorage.getItem(CACHE_KEY));
-        if (cached && LOCATIES.every(l => l.key in cached)) return cached;
-      } catch {}
-
-      // De index is enkele MB's groot; ruime timeout, zeker via een proxy
-      const index = await haalJson(NPR_INDEX_URL, 45000);
-      const facilities = index.ParkingFacilities || [];
-
-      const urls = {};
-      for (const loc of LOCATIES) {
-        const kandidaten = facilities.filter(f => loc.patroon.test(f.name || ''));
-        const facility = kandidaten.find(f => f.dynamicDataUrl) || kandidaten[0] || null;
-        urls[loc.key] = facility
-          ? { url: facility.dynamicDataUrl || null, naam: facility.name }
-          : null;
-      }
-      localStorage.setItem(CACHE_KEY, JSON.stringify(urls));
-      return urls;
+        const res = await fetch('data.json?t=' + Date.now(), { cache: 'no-store' });
+        if (!res.ok) return null;
+        const data = await res.json();
+        return Array.isArray(data?.locations) ? data : null;
+      } catch { return null; }
     }
 
     async function haalStatus(url) {
@@ -320,41 +312,98 @@
       return status;
     }
 
+    // Laatste redmiddel als er geen snapshot en geen bekende UUID is: de
+    // (grote) RDW-index doorzoeken. Cache alleen daadwerkelijk gevonden URL's,
+    // zodat een mislukt of onbruikbaar antwoord niet blijft plakken.
+    async function zoekInIndex() {
+      const index = await haalJson(NPR_INDEX_URL, 45000);
+      const facilities = index?.ParkingFacilities;
+      if (!Array.isArray(facilities) || !facilities.length) throw new Error('onbruikbaar index-antwoord');
+      const urls = {};
+      for (const loc of LOCATIES) {
+        const kandidaten = facilities.filter(f => loc.patroon.test(f.name || ''));
+        const fac = kandidaten.find(f => f.dynamicDataUrl) || kandidaten[0];
+        if (fac) urls[loc.key] = { url: fac.dynamicDataUrl || null, naam: fac.name };
+      }
+      if (Object.keys(urls).length) localStorage.setItem(CACHE_KEY, JSON.stringify(urls));
+      return urls;
+    }
+
     async function ververs() {
       const btn = document.getElementById('refresh-btn');
       const foutBalk = document.getElementById('fout-balk');
       btn.disabled = true;
+      foutBalk.classList.remove('zichtbaar');
 
-      let urls;
-      try {
-        urls = await vindUrls();
-        foutBalk.classList.remove('zichtbaar');
-      } catch (e) {
-        console.error(e);
-        foutBalk.textContent = 'Kon de RDW-parkeerindex niet ophalen (' + e.message +
-          '), ook niet via de reserve-routes. Probeer het over een minuut opnieuw met de Ververs-knop.';
-        foutBalk.classList.add('zichtbaar');
-        LOCATIES.forEach(l => renderTegelFout(l.key, 'Bron onbereikbaar'));
-        btn.disabled = false;
-        return;
+      // 1. Snapshot tonen: betrouwbaar, hooguit ~10 minuten oud
+      const snapshot = await haalSnapshot();
+      const snapPer = {};
+      if (snapshot) {
+        for (const e of snapshot.locations) snapPer[e.key] = e;
+        for (const loc of LOCATIES) {
+          const e = snapPer[loc.key];
+          if (e?.status) renderTegel(loc.key, e.status);
+          else renderTegelFout(loc.key, e?.note || 'Geen data in snapshot');
+        }
       }
 
+      // 2. Live verversen via de kleine dynamische endpoints
+      let cache = {};
+      try { cache = JSON.parse(localStorage.getItem(CACHE_KEY)) || {}; } catch {}
+
+      const liveUrl = loc => snapPer[loc.key]?.dynamicDataUrl || cache[loc.key]?.url ||
+        (loc.uuid ? NPR_DYNAMIC_BASE + loc.uuid : null);
+
+      let indexUrls = {};
+      if (!snapshot && LOCATIES.some(l => !liveUrl(l))) {
+        try { indexUrls = await zoekInIndex(); } catch (e) { console.error('RDW-index', e); }
+      }
+
+      let liveGelukt = 0;
       await Promise.all(LOCATIES.map(async loc => {
-        const entry = urls[loc.key];
-        if (!entry) return renderTegelFout(loc.key, 'Niet gevonden in RDW-index');
-        if (!entry.url) return renderTegelFout(loc.key, `"${entry.naam}" levert geen realtime data`);
+        const snap = snapPer[loc.key];
+        const entry = indexUrls[loc.key];
+        const url = liveUrl(loc) || entry?.url || null;
+
+        if (!url) {
+          if (!snap) {
+            renderTegelFout(loc.key, entry && !entry.url
+              ? `"${entry.naam}" levert geen realtime data`
+              : 'Geen realtime-bron gevonden');
+          }
+          return;
+        }
+
         try {
-          renderTegel(loc.key, await haalStatus(entry.url));
+          renderTegel(loc.key, await haalStatus(url));
+          liveGelukt++;
+          cache[loc.key] = { url, naam: snap?.name || entry?.naam || loc.label };
         } catch (e) {
           console.error(loc.label, e);
-          // Cache kan verouderd zijn (bijv. UUID gewijzigd): volgende keer opnieuw opzoeken
-          if (String(e.message).includes('404')) localStorage.removeItem(CACHE_KEY);
-          renderTegelFout(loc.key, 'Ophalen mislukt: ' + e.message);
+          if (String(e.message).includes('404')) delete cache[loc.key];
+          // Met een snapshot in beeld laten we die gewoon staan
+          if (!snap?.status) {
+            renderTegelFout(loc.key, snap?.note || 'Ophalen mislukt: ' + e.message);
+          }
         }
       }));
+      localStorage.setItem(CACHE_KEY, JSON.stringify(cache));
 
-      document.getElementById('laatste-refresh').textContent =
-        'Bijgewerkt ' + new Date().toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      // 3. Statusregel in de header
+      const refreshEl = document.getElementById('laatste-refresh');
+      const nu = new Date().toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      if (liveGelukt > 0) {
+        refreshEl.textContent = 'Live bijgewerkt ' + nu;
+      } else if (snapshot) {
+        const ms = snapshot.generatedAt > 1e12 ? snapshot.generatedAt : snapshot.generatedAt * 1000;
+        refreshEl.textContent = 'Snapshot van ' +
+          new Date(ms).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
+      } else {
+        refreshEl.textContent = '';
+        foutBalk.textContent = 'Geen data beschikbaar: de RDW-bron is vanuit de browser niet bereikbaar en er is ' +
+          'nog geen snapshot. Controleer of de GitHub Actions-workflow draait en Pages op "GitHub Actions" staat.';
+        foutBalk.classList.add('zichtbaar');
+      }
       btn.disabled = false;
     }
 
